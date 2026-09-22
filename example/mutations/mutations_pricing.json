@@ -1,0 +1,16 @@
+[
+  {
+    "label": "orders of exactly 100 stop shipping free",
+    "file": "pricing.py",
+    "replace": "if total >= FREE_SHIPPING_FROM:",
+    "with": "if total > FREE_SHIPPING_FROM:",
+    "test": "tests/test_pricing.py::test_an_order_of_exactly_100_ships_free"
+  },
+  {
+    "label": "small orders ship free by mistake",
+    "file": "pricing.py",
+    "replace": "    return SHIPPING_FEE",
+    "with": "    return 0.0",
+    "test": "tests/test_pricing.py::test_small_order_has_a_fee"
+  }
+]

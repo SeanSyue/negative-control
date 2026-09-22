@@ -1,0 +1,51 @@
+[
+  {
+    "label": "judge by searching for 'failed' instead of the exit code",
+    "file": "negative_control.py",
+    "replace": "        if proc.returncode == PYTEST_TESTS_FAILED:\n            return \"red\", detail\n        if proc.returncode == PYTEST_ALL_PASSED:",
+    "with": "        if \"failed\" in proc.stdout:\n            return \"red\", detail\n        if True:",
+    "test": "tests/test_verdicts.py::test_a_collection_error_is_broken_not_green"
+  },
+  {
+    "label": "a missing target is read as green instead of broken",
+    "file": "negative_control.py",
+    "replace": "        return \"broken\", \"text to replace not found (the break was not applied)\"",
+    "with": "        return \"green\", \"text to replace not found (the break was not applied)\"",
+    "test": "tests/test_verdicts.py::test_text_that_is_not_there_is_broken_not_green"
+  },
+  {
+    "label": "the restore is skipped",
+    "file": "negative_control.py",
+    "replace": "        shutil.copy2(holding, path)\n        _drop_stale_bytecode(path)\n        if path.read_text",
+    "with": "        _drop_stale_bytecode(path)\n        if False and path.read_text",
+    "test": "tests/test_verdicts.py::test_the_file_is_restored_whatever_the_verdict"
+  },
+  {
+    "label": "the stale bytecode is not dropped",
+    "file": "negative_control.py",
+    "replace": "    for compiled in cache.glob(f\"{path.stem}.*.pyc\"):",
+    "with": "    for compiled in []:",
+    "test": "tests/test_bytecode.py"
+  },
+  {
+    "label": "the rot check stops noticing text that is gone",
+    "file": "negative_control.py",
+    "replace": "                if found == 0:",
+    "with": "                if found < 0:",
+    "test": "tests/test_recipes_still_bite.py::test_the_check_itself_has_teeth"
+  },
+  {
+    "label": "the lock is never taken",
+    "file": "negative_control.py",
+    "replace": "        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)",
+    "with": "        fd = os.open(str(lock) + '.ignored', os.O_CREAT | os.O_WRONLY)",
+    "test": "tests/test_one_run_at_a_time.py::test_a_second_run_is_turned_away"
+  },
+  {
+    "label": "the lock is never released",
+    "file": "negative_control.py",
+    "replace": "            lock.unlink()",
+    "with": "            pass",
+    "test": "tests/test_one_run_at_a_time.py::test_a_normal_run_releases_the_lock"
+  }
+]
