@@ -41,6 +41,20 @@ def test_a_second_run_is_turned_away(project):
     assert ".negative_control.lock" in proc.stderr, "it did not say where the lock is"
 
 
+@pytest.mark.parametrize("form", ["--root=", "--root "])
+def test_the_lock_is_on_the_root_being_changed_not_the_current_folder(project, tmp_path, form):
+    """An earlier version found --root by scanning for the exact token, missed
+    `--root=path`, and locked the current folder. Two runs from different
+    folders then broke the same file, and one break stayed in it for good."""
+    (project / ".negative_control.lock").write_text("pid 0 (placed by a test)", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    args = [f"--root={project}"] if form == "--root=" else ["--root", str(project)]
+    proc = _run(elsewhere, *args, "--check")
+    assert proc.returncode == 3, f"a second run on the same root went ahead ({form})"
+    assert not (elsewhere / ".negative_control.lock").exists()
+
+
 def test_a_normal_run_releases_the_lock(project):
     proc = _run(project, "--check")
     assert proc.returncode != 3

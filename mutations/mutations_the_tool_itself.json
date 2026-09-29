@@ -2,8 +2,8 @@
   {
     "label": "judge by searching for 'failed' instead of the exit code",
     "file": "negative_control.py",
-    "replace": "        if proc.returncode == PYTEST_TESTS_FAILED:\n            return \"red\", detail\n        if proc.returncode == PYTEST_ALL_PASSED:",
-    "with": "        if \"failed\" in proc.stdout:\n            return \"red\", detail\n        if True:",
+    "replace": "        if code == PYTEST_TESTS_FAILED:\n            return \"red\", detail\n        if code == PYTEST_ALL_PASSED:",
+    "with": "        if \"failed\" in detail:\n            return \"red\", detail\n        if True:",
     "test": "tests/test_verdicts.py::test_a_collection_error_is_broken_not_green"
   },
   {
@@ -47,5 +47,40 @@
     "replace": "            lock.unlink()",
     "with": "            pass",
     "test": "tests/test_one_run_at_a_time.py::test_a_normal_run_releases_the_lock"
+  },
+  {
+    "label": "a junction or symlink may lead the break outside the project",
+    "file": "negative_control.py",
+    "replace": "    if not path.is_relative_to(root):",
+    "with": "    if False:",
+    "test": "tests/test_stays_inside_the_project.py::test_a_junction_inside_the_project_cannot_lead_outside"
+  },
+  {
+    "label": "a hard link to a file outside the project is broken too",
+    "file": "negative_control.py",
+    "replace": "    if path.stat().st_nlink > 1:",
+    "with": "    if False:",
+    "test": "tests/test_stays_inside_the_project.py::test_a_hard_link_to_an_outside_file_is_refused"
+  },
+  {
+    "label": "a __pycache__ that leads outside is cleaned anyway",
+    "file": "negative_control.py",
+    "replace": "    if cache.resolve().parent != path.parent:",
+    "with": "    if False:",
+    "test": "tests/test_stays_inside_the_project.py::test_a_cache_folder_that_leads_outside_is_not_cleaned"
+  },
+  {
+    "label": "a test that already fails counts as catching the break",
+    "file": "negative_control.py",
+    "replace": "    if code != PYTEST_ALL_PASSED:\n        return \"broken\", (",
+    "with": "    if False:\n        return \"broken\", (",
+    "test": "tests/test_the_test_must_pass_first.py::test_a_test_that_fails_before_the_break_is_broken_not_red"
+  },
+  {
+    "label": "the lock goes on the current folder, not the root being changed",
+    "file": "negative_control.py",
+    "replace": "        with only_one_run(root):",
+    "with": "        with only_one_run(Path.cwd().resolve()):",
+    "test": "tests/test_one_run_at_a_time.py::test_the_lock_is_on_the_root_being_changed_not_the_current_folder"
   }
 ]

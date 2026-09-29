@@ -47,6 +47,16 @@ Each of these was a real failure of an earlier version of this tool.
    restoring, the break stays in the tree for good. The tool takes a lock
    file and refuses to start if another run holds it.
 
+5. **Only files inside the project.** A recipe's `file` used to be joined
+   onto the root unchecked: `../x`, an absolute path, or a junction inside
+   the project made the tool write - and clear `.pyc` caches - outside it.
+   Targets are now judged by where they resolve to, and a file with other
+   hard links is refused, because breaking it breaks the other name too.
+
+6. **The test must pass first.** A test that already fails turns "red"
+   whatever the break does. Each test is run once on the untouched code;
+   if it does not pass, the verdict is broken, not red.
+
 Usage
 -----
 Run from the root of the project you want to check (or pass `--root`):
@@ -129,8 +139,38 @@ def _no_bytecode_env() -> dict[str, str]:
     return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 
-def _drop_stale_bytecode(path: Path) -> None:
+def resolve_target(root: Path, relative: str) -> tuple["Path | None", str]:
+    """Where a recipe's `file` really is - or (None, why) if it is not plainly
+    one file inside the project (point 5 in the module docstring).
+
+    `root` must already be resolved. Checked after resolving, so a junction or
+    symlink anywhere on the way is judged by where it actually leads.
+    """
+    raw = Path(relative)
+    if raw.is_absolute() or raw.anchor or relative.startswith(("/", "\\")):
+        return None, f"not a path inside the project: {relative}"
+    if ":" in relative:
+        # On Windows `name:stream` writes an alternate data stream.
+        return None, f"not a plain file name: {relative}"
+    if ".." in raw.parts:
+        return None, f"climbs out of the project: {relative}"
+    path = (root / raw).resolve()
+    if not path.is_relative_to(root):
+        return None, f"leads outside the project through a link or junction: {relative}"
+    if not path.is_file():
+        return None, f"file not found: {relative}"
+    if path.stat().st_nlink > 1:
+        # A hard link is the same file under another name, possibly outside
+        # the project. Breaking it would break the other name too.
+        return None, f"has other hard links, which may be outside the project: {relative}"
+    return path, ""
+
+
+def _drop_stale_bytecode(path: Path) -> bool:
     """Delete any `.pyc` cached for `path`, so the next run reads the source.
+
+    Returns False, deleting nothing, if `__pycache__` is a link or junction
+    that leads somewhere else: that cache is not this project's to delete.
 
     Best effort: on Windows a `.pyc` held open by another process cannot be
     deleted. That is why `_no_bytecode_env()` exists as well - it stops new
@@ -138,12 +178,37 @@ def _drop_stale_bytecode(path: Path) -> None:
     """
     cache = path.parent / "__pycache__"
     if not cache.is_dir():
-        return
+        return True
+    if cache.resolve().parent != path.parent:
+        return False
     for compiled in cache.glob(f"{path.stem}.*.pyc"):
         try:
             compiled.unlink()
         except OSError:
             pass
+    return True
+
+
+def _pytest(test: str, *, root: Path, python: str, timeout: int) -> tuple["int | None", str]:
+    """Run one pytest selection. Returns (exit code, or None on timeout; detail)."""
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pytest", test, "-q", "--no-header"],
+            cwd=root,
+            env=_no_bytecode_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"did not finish within {timeout} s"
+    failures = [
+        line for line in proc.stdout.splitlines() if line.startswith("FAILED")
+    ]
+    tail = proc.stdout.strip().splitlines()[-1:]
+    return proc.returncode, failures[0] if failures else " ".join(tail)
 
 
 def run_one(
@@ -152,24 +217,45 @@ def run_one(
     root: Path,
     python: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    baselines: "dict[str, tuple[int | None, str]] | None" = None,
 ) -> tuple[str, str]:
     """Apply, test, restore. Returns (verdict, detail).
 
     Verdict is "red" (a test caught it), "green" (nothing did), or "broken"
     (pytest could not run - the mutation is not a fair test of anything).
 
+    `baselines` caches the unbroken run per test, for a batch. It is only
+    valid while every file is put back between breaks - which is checked.
+
     The restore is in `finally` and is checked: a tool whose whole job is
     "put it back" must never leave the tree broken.
     """
-    path = root / mutation.file
-    if not path.is_file():
-        return "broken", f"file not found: {mutation.file}"
+    root = root.resolve()
+    path, why = resolve_target(root, mutation.file)
+    if path is None:
+        return "broken", why
 
     original = path.read_text(encoding="utf-8")
     if mutation.replace not in original:
         # Deliberately not "skip": the break was never applied, so this is
         # no result - not "the test has no teeth".
         return "broken", "text to replace not found (the break was not applied)"
+    if not _drop_stale_bytecode(path):
+        return "broken", "its __pycache__ leads outside the project; not touching it"
+
+    # Point 6: the test must pass before anything is broken. A test that
+    # already fails would turn "red" whatever the break did.
+    if baselines is not None and mutation.test in baselines:
+        code, detail = baselines[mutation.test]
+    else:
+        code, detail = _pytest(mutation.test, root=root, python=python, timeout=timeout)
+        if baselines is not None:
+            baselines[mutation.test] = (code, detail)
+    if code != PYTEST_ALL_PASSED:
+        return "broken", (
+            "the test does not pass before anything is broken "
+            f"({detail}) - a red from it would prove nothing"
+        )
 
     holding = Path(tempfile.mkdtemp(prefix="negative-control-")) / path.name
     shutil.copy2(path, holding)
@@ -179,36 +265,21 @@ def run_one(
             encoding="utf-8",
         )
         _drop_stale_bytecode(path)
-        try:
-            proc = subprocess.run(
-                [python, "-m", "pytest", mutation.test, "-q", "--no-header"],
-                cwd=root,
-                env=_no_bytecode_env(),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
+        code, detail = _pytest(mutation.test, root=root, python=python, timeout=timeout)
+        if code is None:
             # A run that never finished measured nothing. Reading it as
             # "not caught" would lead someone to delete a working test.
             return "broken", (
-                f"did not finish within {timeout} s - the break probably "
-                "reached a prompt or dialog that nothing answers"
+                f"{detail} - the break probably reached a prompt or dialog "
+                "that nothing answers"
             )
-        failures = [
-            line for line in proc.stdout.splitlines() if line.startswith("FAILED")
-        ]
-        tail = proc.stdout.strip().splitlines()[-1:]
-        detail = failures[0] if failures else " ".join(tail)
 
         # By exit code, not by searching for "failed" (point 2 above).
-        if proc.returncode == PYTEST_TESTS_FAILED:
+        if code == PYTEST_TESTS_FAILED:
             return "red", detail
-        if proc.returncode == PYTEST_ALL_PASSED:
+        if code == PYTEST_ALL_PASSED:
             return "green", detail
-        return "broken", f"exit {proc.returncode} | {detail}"
+        return "broken", f"exit {code} | {detail}"
     finally:
         shutil.copy2(holding, path)
         _drop_stale_bytecode(path)
@@ -297,9 +368,9 @@ def check_recipes(root: Path, paths: "list[Path] | None" = None) -> list[str]:
                 problems.append(f"{head}: missing fields {missing}")
                 continue
 
-            target = root / item["file"]
-            if not target.is_file():
-                problems.append(f"{head}: target file is gone ({item['file']})")
+            target, why = resolve_target(root.resolve(), item["file"])
+            if target is None:
+                problems.append(f"{head}: {why}")
             else:
                 found = target.read_text(encoding="utf-8").count(item["replace"])
                 if found == 0:
@@ -410,6 +481,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
 
+    # The lock goes on the root this run will actually change, taken from this
+    # one parse. An earlier version scanned argv by hand for `--root`, missed
+    # `--root=path`, locked the current directory instead, and two runs broke
+    # the same file (point 4).
+    # --check is inside the lock too: it reads the source, and another run
+    # may be halfway through breaking it.
+    try:
+        with only_one_run(root):
+            return _work(args, root, parser)
+    except AnotherRunHasTheTree as clash:
+        print(str(clash), file=sys.stderr)
+        # 3, not 2: argparse uses 2 for "bad arguments", and "you typed it
+        # wrong" must be distinguishable from "someone else is running".
+        return 3
+
+
+def _work(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParser) -> int:
     if args.check:
         # Before any test runs: this answers "will the verdicts mean anything?"
         problems = check_recipes(root)
@@ -437,9 +525,11 @@ def main(argv: list[str] | None = None) -> int:
 
     labels = {"red": "red ✓", "green": "green ✗ no teeth", "broken": "broken ? did not run"}
     tally = {"red": 0, "green": 0, "broken": 0}
+    baselines: dict[str, tuple[int | None, str]] = {}
     for mutation in mutations:
         verdict, detail = run_one(
-            mutation, root=root, python=args.python, timeout=args.timeout
+            mutation, root=root, python=args.python, timeout=args.timeout,
+            baselines=baselines,
         )
         tally[verdict] += 1
         print(f"{labels[verdict]}  {mutation.name}")
@@ -464,17 +554,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    # --check is inside the lock too: it reads the source, and another run
-    # may be halfway through breaking it.
-    _argv = sys.argv[1:]
-    _root = Path.cwd()
-    if "--root" in _argv:
-        _root = Path(_argv[_argv.index("--root") + 1])
-    try:
-        with only_one_run(_root.resolve()):
-            raise SystemExit(main(_argv))
-    except AnotherRunHasTheTree as clash:
-        print(str(clash), file=sys.stderr)
-        # 3, not 2: argparse uses 2 for "bad arguments", and "you typed it
-        # wrong" must be distinguishable from "someone else is running".
-        raise SystemExit(3) from None
+    raise SystemExit(main())

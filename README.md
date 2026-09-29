@@ -18,6 +18,16 @@ People do this by hand: edit a line, run the test, edit it back. The last step i
 
 ---
 
+## Before you run it
+
+**Running this tool runs the project's tests** — and tests, `conftest.py` files and pytest plugins can do anything your account can do: read files, use the network, see your environment variables. This tool is not a sandbox. Use it on code you trust; run an unfamiliar clone in a throwaway VM or a separate account with no real credentials.
+
+While it runs, it has one of your files broken on purpose. Don't edit that project or run another mutation tool on it at the same time.
+
+You need Python 3 and pytest (`python -m pip install pytest`). Tested on Windows with Python 3.14 and pytest 9.1; other versions and platforms have not been tested.
+
+---
+
 ## Quick start
 
 The `example/` folder is a tiny project with a shipping-fee rule and two tests. Both tests pass.
@@ -116,9 +126,9 @@ Good recipes:
 
 | Verdict | Meaning | What to do |
 |---|---|---|
-| **red ✓** | A test failed. It caught the break. | Nothing. This is the goal. |
+| **red ✓** | The test passed on the untouched code and failed with the break. It caught it. | Nothing. This is the goal. |
 | **green ✗ no teeth** | Every test still passed. | Fix the test, or the case it uses. Do not change the recipe to make it red. |
-| **broken ? did not run** | The tests did not run: the text wasn't found, the code no longer parses, the test was renamed, or it timed out. | This is **no result**. Do not read it as green. |
+| **broken ? did not run** | Nothing was measured: the text wasn't found, the target is outside the project, the test already failed before the break, the code no longer parses, the test was renamed, or it timed out. | This is **no result**. Do not read it as green. |
 
 The third one matters most. A run that measured nothing looks, in a long list, like a run that found nothing — and the next step people take is to delete the test.
 
@@ -158,7 +168,13 @@ An early version searched the output for "failed". A collection error prints `1 
 Python decides a cached `.pyc` is still valid from the source file's modification time — in whole seconds — and its size. Two breaks of the same size applied within one second ran as the *first* break, and the second was reported as having no teeth. The tool deletes the cache for the file before and after each break, and runs tests with `PYTHONDONTWRITEBYTECODE=1`.
 
 **4. Only one run at a time.**
-Two runs on the same project each save the other's broken file as "the original". After both restore, a break is left in your code. The tool takes a lock file (`.negative_control.lock`) and refuses to start if it is held, with exit code 3.
+Two runs on the same project each save the other's broken file as "the original". After both restore, a break is left in your code. The tool takes a lock file (`.negative_control.lock`) and refuses to start if it is held, with exit code 3. The lock goes on the project being changed, even when you pass `--root=path` from another folder — an earlier version missed that form, locked the current folder instead, and two runs broke the same file.
+
+**5. It only touches files inside the project.**
+An early version joined a recipe's `file` onto the project path unchecked. `../x`, an absolute path, or a junction inside the project made it change — and clear caches — outside. Targets are now judged by where they actually lead. A file with other hard links is refused too: breaking it would break the other name as well.
+
+**6. The test must pass first.**
+A test that already fails turns red whatever the break does, and an early version counted that as "caught". Each test now runs once on the untouched code; if it doesn't pass, the verdict is broken, not red.
 
 ---
 
@@ -166,7 +182,11 @@ Two runs on the same project each save the other's broken file as "the original"
 
 - A recipe only covers the break someone thought of. Negative control tells you a test *can* fail; it cannot tell you what you forgot to test.
 - It changes one text match at a time. It is not a mutation-testing framework that generates breaks for you — the point is that you choose the break that matches the claim your test makes.
-- It runs your tests once per recipe, so a large recipe set on a slow suite takes a while. `--check` is instant.
+- It runs each test once on the untouched code and once per recipe, so a large recipe set on a slow suite takes a while. `--check` is instant.
+- It judges by pytest's exit code. A test that is **skipped** or marked **xfail** exits 0 and shows as green, even though nothing was checked — read the detail line before blaming the test.
+- If the tool is **killed** (Task Manager, `kill -9`, power loss), it cannot restore the file. The original is kept in a `negative-control-*` folder in your temp directory, and the lock file stays. Put the file back from that copy (or from your editor / git), check it, then delete the lock by hand.
+- On a timeout, pytest is stopped, but programs the tests started themselves may keep running and write to files after the restore.
+- The restore is checked by comparing text, not bytes. If a `.pyc` cache cannot be deleted, a test may run old code.
 
 ---
 
@@ -183,7 +203,7 @@ Options: `--root` (project root, default: current directory), `--python` (interp
 
 Exit codes: `0` all red · `1` something green or broken · `2` bad arguments, or a restore failed · `3` another run holds the lock.
 
-This repository checks itself: `mutations/mutations_the_tool_itself.json` breaks the tool seven ways, and each one turns its own tests red.
+This repository checks itself: `mutations/mutations_the_tool_itself.json` breaks the tool twelve ways, and each one turns its own tests red.
 
 ---
 
